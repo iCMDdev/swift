@@ -221,12 +221,9 @@ static bool readOptionsBlock(llvm::BitstreamCursor &cursor,
 
 static ValidationInfo validateControlBlock(
     llvm::BitstreamCursor &cursor, SmallVectorImpl<uint64_t> &scratch,
-    std::pair<uint16_t, uint16_t> expectedVersion,
-    bool requiresOSSAModules,
-    bool requiresRevisionMatch,
-    StringRef requiredSDK,
-    ExtendedValidationInfo *extendedInfo,
-    PathObfuscator &pathRecoverer) {
+    std::pair<uint16_t, uint16_t> expectedVersion, bool requiresOSSAModules,
+    bool requiresRevisionMatch, StringRef requiredSDK, StringRef packageName,
+    ExtendedValidationInfo *extendedInfo, PathObfuscator &pathRecoverer) {
   // The control block is malformed until we've at least read a major version
   // number.
   ValidationInfo result;
@@ -258,7 +255,16 @@ static ValidationInfo validateControlBlock(
           result.status = Status::Malformed;
           return result;
         }
-        if (!readOptionsBlock(cursor, scratch, *extendedInfo, pathRecoverer)) {
+
+        if (readOptionsBlock(cursor, scratch, *extendedInfo, pathRecoverer)) {
+          // The client module must be in the same package as the
+          // (optimized) binary module being loaded.
+          if (extendedInfo && extendedInfo->serializePackageEnabled() &&
+              extendedInfo->getModulePackageName() != packageName) {
+            result.status = Status::Malformed;
+            return result;
+          }
+        } else {
           result.status = Status::Malformed;
           return result;
         }
@@ -584,9 +590,8 @@ bool serialization::isSerializedAST(StringRef data) {
 }
 
 ValidationInfo serialization::validateSerializedAST(
-    StringRef data, bool requiresOSSAModules,
-    StringRef requiredSDK,
-    ExtendedValidationInfo *extendedInfo,
+    StringRef data, bool requiresOSSAModules, StringRef requiredSDK,
+    StringRef packageName, ExtendedValidationInfo *extendedInfo,
     SmallVectorImpl<SerializationOptions::FileDependency> *dependencies,
     SmallVectorImpl<SearchPath> *searchPaths) {
   ValidationInfo result;
@@ -630,8 +635,7 @@ ValidationInfo serialization::validateSerializedAST(
           cursor, scratch,
           {SWIFTMODULE_VERSION_MAJOR, SWIFTMODULE_VERSION_MINOR},
           requiresOSSAModules,
-          /*requiresRevisionMatch=*/true,
-          requiredSDK,
+          /*requiresRevisionMatch=*/true, requiredSDK, packageName,
           extendedInfo, localObfuscator);
       if (result.status != Status::Valid)
         return result;
@@ -1166,8 +1170,10 @@ bool ModuleFileSharedCore::readModuleDocIfPresent(PathObfuscator &pathRecoverer)
       info = validateControlBlock(
           docCursor, scratch, {SWIFTDOC_VERSION_MAJOR, SWIFTDOC_VERSION_MINOR},
           RequiresOSSAModules,
-          /*requiresRevisionMatch*/false,
-          /*requiredSDK*/StringRef(), /*extendedInfo*/nullptr, pathRecoverer);
+          /*requiresRevisionMatch*/ false,
+          /*requiredSDK*/ StringRef(),
+          /*packageName*/ StringRef(),
+          /*extendedInfo*/ nullptr, pathRecoverer);
       if (info.status != Status::Valid)
         return false;
       // Check that the swiftdoc is actually for this module.
@@ -1311,8 +1317,10 @@ bool ModuleFileSharedCore::readModuleSourceInfoIfPresent(PathObfuscator &pathRec
           infoCursor, scratch,
           {SWIFTSOURCEINFO_VERSION_MAJOR, SWIFTSOURCEINFO_VERSION_MINOR},
           RequiresOSSAModules,
-          /*requiresRevisionMatch*/false,
-          /*requiredSDK*/StringRef(), /*extendedInfo*/nullptr, pathRecoverer);
+          /*requiresRevisionMatch*/ false,
+          /*requiredSDK*/ StringRef(),
+          /*packageName*/ StringRef(),
+          /*extendedInfo*/ nullptr, pathRecoverer);
       if (info.status != Status::Valid)
         return false;
       // Check that the swiftsourceinfo is actually for this module.
@@ -1386,10 +1394,9 @@ ModuleFileSharedCore::ModuleFileSharedCore(
     std::unique_ptr<llvm::MemoryBuffer> moduleInputBuffer,
     std::unique_ptr<llvm::MemoryBuffer> moduleDocInputBuffer,
     std::unique_ptr<llvm::MemoryBuffer> moduleSourceInfoInputBuffer,
-    bool isFramework,
-    bool requiresOSSAModules,
-    StringRef requiredSDK,
-    serialization::ValidationInfo &info, PathObfuscator &pathRecoverer)
+    bool isFramework, bool requiresOSSAModules, StringRef requiredSDK,
+    StringRef packageName, serialization::ValidationInfo &info,
+    PathObfuscator &pathRecoverer)
     : ModuleInputBuffer(std::move(moduleInputBuffer)),
       ModuleDocInputBuffer(std::move(moduleDocInputBuffer)),
       ModuleSourceInfoInputBuffer(std::move(moduleSourceInfoInputBuffer)),
@@ -1441,8 +1448,8 @@ ModuleFileSharedCore::ModuleFileSharedCore(
           cursor, scratch,
           {SWIFTMODULE_VERSION_MAJOR, SWIFTMODULE_VERSION_MINOR},
           RequiresOSSAModules,
-          /*requiresRevisionMatch=*/true, requiredSDK,
-          &extInfo, pathRecoverer);
+          /*requiresRevisionMatch=*/true, requiredSDK, packageName, &extInfo,
+          pathRecoverer);
       if (info.status != Status::Valid) {
         error(info.status);
         return;
